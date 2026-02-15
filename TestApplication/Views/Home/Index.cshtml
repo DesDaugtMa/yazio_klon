@@ -1,0 +1,330 @@
+﻿@{
+    ViewData["Title"] = "Scanner & Running Pro";
+}
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+
+<style>
+    /* --- Allgemeine Styles --- */
+    .nav-tabs { margin-bottom: 20px; }
+    
+    /* --- Scanner & Search Styles --- */
+    #interactive.viewport {
+        position: relative; width: 100%; max-width: 600px; height: auto;
+        margin: 0 auto; overflow: hidden; background: #000; border-radius: 10px; display: none;
+    }
+    #interactive.viewport > video, #interactive.viewport > canvas { width: 100%; max-width: 100%; }
+    canvas.drawingBuffer { position: absolute; top: 0; left: 0; }
+    .laser-line {
+        position: absolute; top: 50%; left: 5%; right: 5%; height: 2px;
+        background: red; box-shadow: 0 0 4px red; z-index: 10; pointer-events: none;
+    }
+    
+    /* Autocomplete Search Styles */
+    .search-container {
+        position: relative;
+        max-width: 600px;
+        margin: 20px auto 0 auto; /* Abstand nach oben zum Scanner */
+    }
+    .suggestions-list {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 0 0 8px 8px;
+        z-index: 1000;
+        max-height: 200px;
+        overflow-y: auto;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        display: none; /* Default hidden */
+    }
+    .suggestion-item {
+        padding: 10px 15px;
+        border-bottom: 1px solid #eee;
+        cursor: pointer;
+        text-align: left;
+    }
+    .suggestion-item:hover { background-color: #f8f9fa; }
+    .suggestion-item:last-child { border-bottom: none; }
+    .brand-tag { font-size: 0.8rem; color: #888; display: block; }
+
+    /* --- Running App Styles --- */
+    #map { height: 40vh; width: 100%; border-radius: 12px; z-index: 1; }
+    .dashboard-card { background: #f8f9fa; border-radius: 12px; padding: 10px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    .stat-value { font-size: 1.4rem; font-weight: bold; color: #0d6efd; }
+    .stat-label { font-size: 0.75rem; text-transform: uppercase; color: #6c757d; }
+    #run-controls { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 1000; display: flex; gap: 15px; }
+    .btn-circle { width: 65px; height: 65px; border-radius: 50%; font-size: 1.8rem; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 10px rgba(0,0,0,0.3); border: 4px solid white; }
+    
+    .run-item { background: white; border-left: 5px solid #0d6efd; border-radius: 8px; padding: 12px; margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); cursor: pointer; transition: transform 0.1s; }
+    .run-item:active { transform: scale(0.98); }
+    .run-date { font-size: 0.8rem; color: #888; margin-bottom: 2px; }
+    .run-stats { font-weight: bold; font-size: 1.1rem; }
+    .run-details { font-size: 0.9rem; color: #555; }
+    #detail-map { height: 300px; width: 100%; border-radius: 8px; margin-top: 15px; }
+</style>
+
+<div class="container mt-3 mb-5 pb-5">
+    
+    <ul class="nav nav-tabs nav-fill" id="appTabs" role="tablist">
+        <li class="nav-item" role="presentation"><button class="nav-link active" id="nutrition-tab" data-bs-toggle="tab" data-bs-target="#nutrition" type="button" role="tab"><i class="bi bi-egg-fried"></i> Nutrition</button></li>
+        <li class="nav-item" role="presentation"><button class="nav-link" id="geolocation-tab" data-bs-toggle="tab" data-bs-target="#geolocation" type="button" role="tab"><i class="bi bi-geo-alt"></i> Running</button></li>
+    </ul>
+
+    <div class="tab-content" id="appTabsContent">
+        
+        <div class="tab-pane fade show active text-center" id="nutrition" role="tabpanel">
+            <h3>Produkt erfassen</h3>
+            
+            <div id="mobile-controls" class="mt-4" style="display:none;">
+                <button id="btn-scan" class="btn btn-primary btn-lg" onclick="startScanner()"><i class="bi bi-upc-scan"></i> Scanner starten</button>
+            </div>
+            
+            <div id="interactive" class="viewport mt-3 shadow">
+                <div class="laser-line"></div>
+                <button class="btn btn-sm btn-danger" style="position:absolute; top:10px; right:10px; z-index:20" onclick="stopScanner()">X</button>
+            </div>
+
+            <div class="search-container">
+                <div class="input-group">
+                    <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+                    <input type="text" id="product-search" class="form-control" placeholder="Produkt suchen (z.B. Nutella)" autocomplete="off" oninput="handleSearchInput(this)">
+                </div>
+                <div id="suggestions" class="suggestions-list shadow-sm"></div>
+            </div>
+
+            <div id="result" class="alert alert-success mt-4" style="display:none;">
+                <div id="result-content"></div>
+                <button class="btn btn-outline-success mt-2" onclick="resetUI()">Neue Suche</button>
+            </div>
+        </div>
+
+        <div class="tab-pane fade" id="geolocation" role="tabpanel">
+            <div class="row text-center g-2 mb-2">
+                <div class="col-4"><div class="dashboard-card"><div class="stat-value" id="disp-dist">0.00</div><div class="stat-label">km</div></div></div>
+                <div class="col-4"><div class="dashboard-card"><div class="stat-value" id="disp-time">00:00</div><div class="stat-label">Zeit</div></div></div>
+                <div class="col-4"><div class="dashboard-card"><div class="stat-value" id="disp-pace">--:--</div><div class="stat-label">min/km</div></div></div>
+            </div>
+            <div id="map" class="shadow-sm border mb-3"></div>
+            <div id="gps-status" class="alert alert-warning py-1" style="display:none; font-size:0.9rem;"><i class="bi bi-satellite-dish"></i> Suche GPS...</div>
+            <h5 class="mt-4 text-start">Deine Läufe</h5>
+            <div id="run-history-container" class="pb-5"><p class="text-muted text-center mt-3">Noch keine Läufe gespeichert.</p></div>
+            <div id="run-controls">
+                <button id="btn-stop-run" class="btn btn-danger btn-circle" onclick="finishRun()" style="display:none;"><i class="bi bi-stop-fill"></i></button>
+                <button id="btn-start-run" class="btn btn-success btn-circle" onclick="toggleRun()"><i class="bi bi-play-fill"></i></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="runDetailModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header"><h5 class="modal-title">Lauf Details</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+            <div class="modal-body">
+                <div class="d-flex justify-content-between mb-3">
+                    <div class="text-center"><div class="h4 mb-0 text-primary" id="modal-dist">0.00</div><small class="text-muted">km</small></div>
+                    <div class="text-center"><div class="h4 mb-0 text-primary" id="modal-time">00:00</div><small class="text-muted">Zeit</small></div>
+                    <div class="text-center"><div class="h4 mb-0 text-primary" id="modal-pace">0:00</div><small class="text-muted">Pace</small></div>
+                </div>
+                <div class="text-muted small text-center mb-2" id="modal-date"></div>
+                <div id="detail-map"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-danger" onclick="deleteCurrentRun()">Löschen</button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Schließen</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script src="https://cdn.jsdelivr.net/npm/@@ericblade/quagga2/dist/quagga.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+    <script>
+        // --- GLOBALS ---
+        let map, polyline, currentMarker, detailMap, detailPolyline, currentRunId = null;
+        let watchId = null, isRunning = false, startTime, timerInterval, pathCoordinates = [], totalDistance = 0, wakeLock = null;
+        
+        // NEU: Timer für die Suche (Debounce)
+        let searchTimeout;
+
+        // --- INIT ---
+        document.addEventListener("DOMContentLoaded", function() {
+            if (isMobileDevice()) document.getElementById('mobile-controls').style.display = 'block';
+            loadRunHistory();
+            document.querySelector('button[data-bs-target="#geolocation"]').addEventListener('shown.bs.tab', function () {
+                if(isScanning) stopScanner();
+                if(!map) initMap(); else setTimeout(() => { map.invalidateSize(); }, 200);
+            });
+            document.getElementById('runDetailModal').addEventListener('shown.bs.modal', function () { if(detailMap) detailMap.invalidateSize(); });
+        });
+
+        // ========================
+        // NEU: SEARCH LOGIC
+        // ========================
+        function handleSearchInput(input) {
+            const query = input.value.trim();
+            const list = document.getElementById('suggestions');
+            
+            // Bestehenden Timer löschen (Debounce)
+            clearTimeout(searchTimeout);
+
+            if (query.length < 3) {
+                list.style.display = 'none';
+                list.innerHTML = '';
+                return;
+            }
+
+            // Neuen Timer setzen (300ms warten bevor Suche startet)
+            searchTimeout = setTimeout(() => {
+                fetch(`/Product/SearchProducts?query=${encodeURIComponent(query)}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        list.innerHTML = '';
+                        if (data.length > 0) {
+                            list.style.display = 'block';
+                            data.forEach(item => {
+                                // HTML für einen Vorschlag
+                                const div = document.createElement('div');
+                                div.className = 'suggestion-item';
+                                div.innerHTML = `<strong>${item.name}</strong><span class="brand-tag">${item.brand}</span>`;
+                                
+                                // Klick-Handler: Wenn ausgewählt, lade Daten wie beim Scan
+                                div.onclick = () => selectSuggestion(item.barcode);
+                                list.appendChild(div);
+                            });
+                        } else {
+                            list.style.display = 'none';
+                        }
+                    });
+            }, 300);
+        }
+
+        function selectSuggestion(barcode) {
+            // Liste ausblenden und Input leeren
+            document.getElementById('suggestions').style.display = 'none';
+            document.getElementById('product-search').value = '';
+            
+            // Scanner Logik wiederverwenden!
+            fetchProductData(barcode);
+        }
+
+        // ========================
+        // RUNNING LOGIC
+        // ========================
+        function initMap() {
+            map = L.map('map').setView([51.1657, 10.4515], 13);
+            L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+            polyline = L.polyline([], {color: '#0d6efd', weight: 5}).addTo(map);
+            navigator.geolocation.getCurrentPosition(pos => {
+                const { latitude, longitude } = pos.coords; map.setView([latitude, longitude], 16); updateMarker(latitude, longitude);
+            }, () => {});
+        }
+
+        async function toggleRun() {
+            const btn = document.getElementById('btn-start-run');
+            const stopBtn = document.getElementById('btn-stop-run');
+            if (!isRunning) {
+                isRunning = true; btn.innerHTML = '<i class="bi bi-pause-fill"></i>'; btn.className = "btn btn-warning btn-circle"; stopBtn.style.display = 'flex';
+                try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+                try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock("portrait").catch(e=>{}); } catch (e) {}
+                if(pathCoordinates.length === 0) { totalDistance = 0; startTime = Date.now(); updateStatsDisplay(); }
+                timerInterval = setInterval(updateTimer, 1000);
+                if (navigator.geolocation) {
+                    document.getElementById('gps-status').style.display = 'block';
+                    watchId = navigator.geolocation.watchPosition(onPositionUpdate, err => {}, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+                }
+            } else {
+                isRunning = false; btn.innerHTML = '<i class="bi bi-play-fill"></i>'; btn.className = "btn btn-success btn-circle";
+                clearInterval(timerInterval); navigator.geolocation.clearWatch(watchId);
+                document.getElementById('gps-status').style.display = 'none';
+                if(wakeLock) { wakeLock.release(); wakeLock = null; }
+                if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock();
+            }
+        }
+
+        function finishRun() {
+            if(confirm("Lauf beenden und speichern?")) {
+                toggleRun();
+                const runData = { id: Date.now(), date: new Date().toLocaleString(), distance: totalDistance.toFixed(2), time: document.getElementById('disp-time').innerText, pace: document.getElementById('disp-pace').innerText, path: pathCoordinates };
+                saveRun(runData);
+                document.getElementById('btn-stop-run').style.display = 'none';
+                pathCoordinates = []; polyline.setLatLngs([]); totalDistance = 0; updateStatsDisplay(); document.getElementById('disp-time').innerText = "00:00";
+                if(currentMarker) map.removeLayer(currentMarker); currentMarker = null;
+                alert("Lauf gespeichert!");
+            }
+        }
+
+        function onPositionUpdate(pos) {
+            document.getElementById('gps-status').style.display = 'none';
+            const { latitude, longitude, accuracy } = pos.coords;
+            map.setView([latitude, longitude], map.getZoom()); updateMarker(latitude, longitude);
+            if (accuracy < 30 && pathCoordinates.length > 0) {
+                const last = pathCoordinates[pathCoordinates.length - 1];
+                const dist = calculateDistance(last[0], last[1], latitude, longitude);
+                if (dist > 0.005) { totalDistance += dist; pathCoordinates.push([latitude, longitude]); polyline.setLatLngs(pathCoordinates); updateStatsDisplay(); }
+            } else if (pathCoordinates.length === 0) { pathCoordinates.push([latitude, longitude]); }
+        }
+
+        // --- HISTORY & DETAIL LOGIC ---
+        function saveRun(run) { let h = JSON.parse(localStorage.getItem('runHistory') || "[]"); h.unshift(run); localStorage.setItem('runHistory', JSON.stringify(h)); loadRunHistory(); }
+        function loadRunHistory() {
+            const c = document.getElementById('run-history-container'); const h = JSON.parse(localStorage.getItem('runHistory') || "[]");
+            if(h.length === 0) { c.innerHTML = '<p class="text-muted text-center mt-3">Starten Sie Ihren ersten Lauf!</p>'; return; }
+            let html = '';
+            h.forEach(r => { html += `<div class="run-item" onclick="showRunDetails(${r.id})"><div><div class="run-date">${r.date}</div><div class="run-stats">${r.distance} km</div></div><div class="text-end"><div class="run-details"><i class="bi bi-stopwatch"></i> ${r.time}</div><div class="run-details text-primary small">Details ></div></div></div>`; });
+            c.innerHTML = html;
+        }
+        function showRunDetails(id) {
+            const h = JSON.parse(localStorage.getItem('runHistory') || "[]"); const r = h.find(x => x.id === id); if(!r) return;
+            currentRunId = id;
+            document.getElementById('modal-dist').innerText = r.distance; document.getElementById('modal-time').innerText = r.time; document.getElementById('modal-pace').innerText = r.pace; document.getElementById('modal-date').innerText = r.date;
+            new bootstrap.Modal(document.getElementById('runDetailModal')).show();
+            if(!detailMap) { detailMap = L.map('detail-map'); L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(detailMap); detailPolyline = L.polyline([], {color: 'red', weight: 4}).addTo(detailMap); }
+            if (r.path && r.path.length > 0) { detailPolyline.setLatLngs(r.path); setTimeout(() => { detailMap.fitBounds(detailPolyline.getBounds()); }, 300); }
+            else { detailPolyline.setLatLngs([]); detailMap.setView([51.1657, 10.4515], 5); }
+        }
+        function deleteCurrentRun() {
+            if(!confirm("Löschen?")) return;
+            let h = JSON.parse(localStorage.getItem('runHistory') || "[]"); h = h.filter(r => r.id !== currentRunId); localStorage.setItem('runHistory', JSON.stringify(h)); loadRunHistory();
+            bootstrap.Modal.getInstance(document.getElementById('runDetailModal')).hide();
+        }
+
+        // --- HELPERS ---
+        function updateMarker(lat, lng) { if (currentMarker) currentMarker.setLatLng([lat, lng]); else currentMarker = L.marker([lat, lng]).addTo(map); }
+        function updateTimer() {
+            const diff = Date.now() - startTime; const sec = Math.floor((diff/1000)%60); const min = Math.floor((diff/(1000*60))%60); const hr = Math.floor((diff/(1000*60*60)));
+            document.getElementById('disp-time').innerText = (hr>0?pad(hr)+':':'')+pad(min)+':'+pad(sec);
+            if(totalDistance > 0.05) { const p = (diff/1000/60) / totalDistance; const pm = Math.floor(p); const ps = Math.round((p - pm)*60); document.getElementById('disp-pace').innerText = `${pm}:${pad(ps)}`; }
+        }
+        function pad(n) { return n<10?'0'+n:n; }
+        function updateStatsDisplay() { document.getElementById('disp-dist').innerText = totalDistance.toFixed(2); }
+        function calculateDistance(lat1, lon1, lat2, lon2) { const R = 6371; const dLat = (lat2-lat1)*Math.PI/180; const dLon = (lon2-lon1)*Math.PI/180; const a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)*Math.sin(dLon/2); return R*2*Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); }
+
+        // --- SCANNER HELPERS ---
+        let isScanning = false;
+        function isMobileDevice() { return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent); }
+        function startScanner() { 
+            document.getElementById('mobile-controls').style.display = 'none'; document.getElementById('interactive').style.display = 'block'; document.getElementById('result').style.display = 'none';
+            Quagga.init({inputStream:{name:"Live",type:"LiveStream",target:document.querySelector('#interactive'),constraints:{facingMode:"environment",aspectRatio:{min:1,max:2}}},decoder:{readers:["ean_reader"]},locate:true}, function(err){ if(!err) { Quagga.start(); isScanning=true; } });
+            Quagga.onDetected(r => { if(isScanning && r.codeResult.code){ stopScanner(); fetchProductData(r.codeResult.code); } });
+        }
+        function stopScanner(){ if(isScanning){ Quagga.stop(); isScanning=false; } document.getElementById('interactive').style.display='none'; resetUI(); }
+        function resetUI() { 
+            document.getElementById('result').style.display = 'none'; 
+            document.getElementById('product-search').value = ''; // Suche auch leeren
+            if(isMobileDevice()) document.getElementById('mobile-controls').style.display = 'block';
+        }
+        function fetchProductData(bc) {
+            document.getElementById('result').style.display='block'; document.getElementById('result-content').innerHTML='Lade...';
+            const fd = new FormData(); fd.append('barcode', bc);
+            fetch('/Product/GetProductInfo', {method:'POST', body:fd}).then(r=>r.json()).then(d=>{
+                document.getElementById('result-content').innerHTML=`<b>${d.name}</b><br>${d.calories} kcal`;
+            }).catch(e=>document.getElementById('result-content').innerHTML='Nicht gefunden');
+        }
+    </script>
+}
